@@ -16,7 +16,7 @@
 - PostgreSQL
 
 ## Схема базы данных
-![Database Schema](/ER-diagram.png)
+![Database Schema](/ER-Diagram.png)
 
 
 ## ⚙ Установка и запуск
