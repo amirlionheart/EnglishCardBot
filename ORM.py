@@ -1,78 +1,132 @@
+import os
+from contextlib import contextmanager
+
 import sqlalchemy as sq
+from dotenv import load_dotenv
+from sqlalchemy import ForeignKey, create_engine
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-from sqlalchemy import create_engine, ForeignKey
+
+load_dotenv()
 
 Base = declarative_base()
 
-# Настройка подключения к БД
-DSN = "sqlite:///english_bot.db"
+DSN = os.getenv("DATABASE_URL")
+if not DSN:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add it to .env, for example: "
+        "postgresql://user:password@localhost:5432/dbname"
+    )
+
 engine = create_engine(DSN)
 Session = sessionmaker(bind=engine)
 
 
 class User(Base):
+    """Пользователь Telegram."""
+
     __tablename__ = "user"
-    # Telegram ID может быть очень длинным, используем BigInteger
+
     id = sq.Column(sq.BigInteger, primary_key=True)
     words = relationship("UserWord", back_populates="user")
 
 
 class Word(Base):
+    """Слово на русском языке."""
+
     __tablename__ = "word"
+
     id = sq.Column(sq.Integer, primary_key=True)
     russian = sq.Column(sq.String(100), nullable=False)
-    # Флаг для отделения стартового набора от личных слов
     is_common = sq.Column(sq.Boolean, default=False)
 
-    # Cascade обеспечивает удаление связанных данных при удалении самого слова
-    translation = relationship("Translation", back_populates="word", uselist=False, cascade="all, delete-orphan")
-    users = relationship("UserWord", back_populates="word", cascade="all, delete-orphan")
+    translation = relationship(
+        "Translation",
+        back_populates="word",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    users = relationship(
+        "UserWord", back_populates="word", cascade="all, delete-orphan"
+    )
 
 
 class Translation(Base):
+    """Английский перевод слова."""
+
     __tablename__ = "translation"
+
     id = sq.Column(sq.Integer, primary_key=True)
     english = sq.Column(sq.String(100), nullable=False)
-    word_id = sq.Column(sq.Integer, ForeignKey("word.id"))
+    word_id = sq.Column(sq.Integer, ForeignKey("word.id"), unique=True)
 
     word = relationship("Word", back_populates="translation")
 
 
 class UserWord(Base):
-    """Связующая таблица для реализации персональных словарей"""
+    """Связь пользователя с персональным словом."""
+
     __tablename__ = "user_word"
+
     id = sq.Column(sq.Integer, primary_key=True)
-    user_id = sq.Column(sq.BigInteger, ForeignKey("user.id"))
-    word_id = sq.Column(sq.Integer, ForeignKey("word.id"))
+    user_id = sq.Column(sq.BigInteger, ForeignKey("user.id"), nullable=False)
+    word_id = sq.Column(sq.Integer, ForeignKey("word.id"), nullable=False)
 
     user = relationship("User", back_populates="words")
     word = relationship("Word", back_populates="users")
 
 
+COMMON_SET = [
+    ("Красный", "Red"),
+    ("Синий", "Blue"),
+    ("Зеленый", "Green"),
+    ("Я", "I"),
+    ("Ты", "You"),
+    ("Он", "He"),
+    ("Она", "She"),
+    ("Мы", "We"),
+    ("Они", "They"),
+    ("Собака", "Dog"),
+]
+
+
+def get_dsn() -> str:
+    """Возвращает текущую строку подключения к БД."""
+
+    return DSN
+
+
 def get_session():
-    """Создает и возвращает новую сессию для работы с БД"""
+    """Создает и возвращает новую сессию для работы с БД."""
+
     return Session()
 
 
-def init_db():
-    """Создает таблицы и заполняет базу начальным набором слов"""
-    Base.metadata.create_all(engine)
-    session = get_session()
+@contextmanager
+def session_scope():
+    """Контекстный менеджер сессии SQLAlchemy."""
 
-    # Проверка на наличие общих слов, чтобы не дублировать их при каждом запуске
-    if session.query(Word).filter(Word.is_common == True).count() == 0:
-        common_set = [
-            ('Красный', 'Red'), ('Синий', 'Blue'), ('Зеленый', 'Green'),
-            ('Я', 'I'), ('Ты', 'You'), ('Он', 'He'), ('Она', 'She'),
-            ('Мы', 'We'), ('Они', 'They'), ('Собака', 'Dog')
-        ]
-
-        for ru, en in common_set:
-            new_word = Word(russian=ru, is_common=True)
-            new_word.translation = Translation(english=en)
-            session.add(new_word)
-
+    session = Session()
+    try:
+        yield session
         session.commit()
-        print("База данных инициализирована: добавлено 10 базовых слов.")
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
-    session.close()
+
+def init_db() -> None:
+    """Создает таблицы и заполняет базовый общий словарь."""
+
+    Base.metadata.create_all(engine)
+
+    with session_scope() as session:
+        common_exists = session.query(Word).filter(Word.is_common.is_(True)).count()
+        if common_exists:
+            return
+
+        for russian, english in COMMON_SET:
+            word = Word(russian=russian, is_common=True)
+            word.translation = Translation(english=english)
+            session.add(word)

@@ -1,0 +1,24 @@
+-- Схема БД для EnglishCard
+
+CREATE TABLE IF NOT EXISTS "user" (
+    id BIGINT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS word (
+    id SERIAL PRIMARY KEY,
+    russian VARCHAR(100) NOT NULL,
+    is_common BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS translation (
+    id SERIAL PRIMARY KEY,
+    english VARCHAR(100) NOT NULL,
+    word_id INTEGER UNIQUE REFERENCES word(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_word (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    word_id INTEGER NOT NULL REFERENCES word(id) ON DELETE CASCADE,
+    UNIQUE (user_id, word_id)
+);

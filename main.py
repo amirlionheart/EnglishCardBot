@@ -1,221 +1,287 @@
 import os
 import random
-from dotenv import load_dotenv
+
 import telebot
+from dotenv import load_dotenv
 from telebot import types
-from sqlalchemy.orm import joinedload
-from ORM import get_session, User, Word, Translation, UserWord, init_db
 
-load_dotenv()
-token = os.getenv('BOT_TOKEN')
-bot = telebot.TeleBot(token)
+from ORM import get_dsn, init_db
+from db_service import WordCard, WordService
 
+load_dotenv(encoding="utf-8")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не найден. Добавьте его в .env")
+
+bot = telebot.TeleBot(BOT_TOKEN)
 init_db()
 
-def main_menu_keyboard():
-    """Главное меню"""
+
+WELCOME_TEXT = (
+    "Привет 👋 Давай попрактикуемся в английском языке. "
+    "Тренировки можешь проходить в удобном для себя темпе.\n\n"
+    "У тебя есть возможность использовать тренажёр, как конструктор, "
+    "и собирать свою собственную базу для обучения. Для этого воспользуйся "
+    "инструментами:\n\n"
+    "Добавить слово ➕\n"
+    "Удалить слово 🔙\n"
+    "Начать Викторину 🧠\n"
+    "Ну что, начнём ⬇️"
+)
+
+
+def main_menu_keyboard() -> types.ReplyKeyboardMarkup:
+    """Возвращает клавиатуру главного меню."""
+
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn_quiz = types.KeyboardButton("Викторина 🧠")
-    btn_list = types.KeyboardButton("Список слов 📖")  # Новая кнопка
-    btn_add = types.KeyboardButton("Добавить слово ➕")
-    btn_del = types.KeyboardButton("Удалить слово 🔙")
-    markup.add(btn_quiz, btn_list, btn_add, btn_del)
+    markup.add(
+        types.KeyboardButton("Викторина 🧠"),
+        types.KeyboardButton("Список слов 📖"),
+        types.KeyboardButton("Добавить слово ➕"),
+        types.KeyboardButton("Удалить слово 🔙"),
+    )
     return markup
 
 
-def quiz_keyboard(correct_word, all_words):
-    """Клавиатура для квиза"""
+def quiz_keyboard(
+    correct_word: WordCard,
+    all_words: list[WordCard],
+) -> types.ReplyKeyboardMarkup:
+    """Возвращает клавиатуру с 4 вариантами ответа."""
+
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    others = [w.translation.english for w in all_words if w.id != correct_word.id]
-    num_options = min(len(others), 3)
-    options = random.sample(others, num_options) + [correct_word.translation.english]
+    others = [word.english for word in all_words if word.id != correct_word.id]
+    options = random.sample(others, 3) + [correct_word.english]
     random.shuffle(options)
 
-    markup.add(*[types.KeyboardButton(opt) for opt in options])
-    markup.row(types.KeyboardButton('Выйти в меню 🏠'))
+    markup.add(*[types.KeyboardButton(option) for option in options])
+    markup.row(types.KeyboardButton("Выйти в меню 🏠"))
     return markup
 
 
-# --- ЛОГИКА СЛОВ ---
-
-def get_user_words(cid):
-    """Общие слова + личные для квиза"""
-    session = get_session()
-    try:
-        common = session.query(Word).options(joinedload(Word.translation)).filter(Word.is_common == True).all()
-        user_w = session.query(Word).options(joinedload(Word.translation)).join(UserWord).filter(
-            UserWord.user_id == cid).all()
-        return list(set(common + user_w))
-    finally:
-        session.close()
-
-
-def get_only_personal_words(cid):
-    """Только слова, добавленные конкретным пользователем"""
-    session = get_session()
-    try:
-        return session.query(Word).options(joinedload(Word.translation)).join(UserWord).filter(
-            UserWord.user_id == cid).all()
-    finally:
-        session.close()
-
-
-# --- ОБРАБОТЧИКИ ---
-
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=["start"])
 def start_bot(message):
-    cid = message.chat.id
-    bot.clear_step_handler_by_chat_id(cid)
+    """Стартовый обработчик: приветствие и регистрация пользователя."""
 
-    session = get_session()
-    if not session.query(User).filter(User.id == cid).first():
-        session.add(User(id=cid))
-        session.commit()
-    session.close()
-
-    welcome_text = (
-        "Привет 👋 Давай попрактикуемся в английском языке.\n\n"
-        "Выбери действие в меню ниже ⬇️"
-    )
-    bot.send_message(cid, welcome_text, reply_markup=main_menu_keyboard())
+    user_id = message.chat.id
+    bot.clear_step_handler_by_chat_id(user_id)
+    WordService.ensure_user(user_id)
+    bot.send_message(user_id, WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
 
 @bot.message_handler(func=lambda message: True)
 def handle_menu(message):
-    cid = message.chat.id
+    """Обрабатывает нажатия кнопок основного меню."""
+
+    user_id = message.chat.id
 
     if message.text == "Викторина 🧠":
         send_quiz_question(message)
-
     elif message.text == "Список слов 📖":
         show_personal_words(message)
-
     elif message.text == "Добавить слово ➕":
-        msg = bot.send_message(cid, "Введите слово на РУССКОМ:", reply_markup=types.ReplyKeyboardRemove())
-        bot.register_next_step_handler(msg, add_word_ru)
-
+        prompt = bot.send_message(
+            user_id,
+            "Введите слово на русском:",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(prompt, add_word_ru)
     elif message.text == "Удалить слово 🔙":
         delete_word_start(message)
-
     else:
-        bot.send_message(cid, "Используйте кнопки меню.", reply_markup=main_menu_keyboard())
+        bot.send_message(
+            user_id,
+            "Используйте кнопки меню.",
+            reply_markup=main_menu_keyboard(),
+        )
 
-
-# --- ЛОГИКА СПИСКА СЛОВ ---
 
 def show_personal_words(message):
-    cid = message.chat.id
-    words = get_only_personal_words(cid)
+    """Показывает персональный словарь пользователя."""
+
+    user_id = message.chat.id
+    words = WordService.get_personal_words(user_id)
 
     if not words:
-        bot.send_message(cid, "Ваш личный список слов пока пуст. Добавьте новые слова кнопкой ➕",
-                         reply_markup=main_menu_keyboard())
+        bot.send_message(
+            user_id,
+            "Ваш личный список слов пока пуст. Добавьте новые слова кнопкой ➕",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     text = "📝 **Ваш личный словарь:**\n\n"
-    for i, w in enumerate(words, 1):
-        text += f"{i}. {w.russian} — {w.translation.english}\n"
+    for index, word in enumerate(words, start=1):
+        text += f"{index}. {word.russian} — {word.english}\n"
 
-    bot.send_message(cid, text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(
+        user_id,
+        text,
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
-# --- ЛОГИКА ВИКТОРИНЫ ---
+def send_quiz_question(message, prefix: str = ""):
+    """Отправляет вопрос викторины."""
 
-def send_quiz_question(message, prefix=""):
-    cid = message.chat.id
-    words = get_user_words(cid)
+    user_id = message.chat.id
+    words = WordService.get_training_words(user_id)
 
     if len(words) < 4:
-        bot.send_message(cid, "Нужно минимум 4 слова в базе! Добавьте свои слова.", reply_markup=main_menu_keyboard())
+        bot.send_message(
+            user_id,
+            "Нужно минимум 4 слова в базе! Добавьте свои слова.",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     target_word = random.choice(words)
     markup = quiz_keyboard(target_word, words)
+    text = f"{prefix}\n\nКак переводится слово: *{target_word.russian}*?".strip()
 
-    full_text = f"{prefix}\n\nКак переводится слово: *{target_word.russian}*?"
-    bot.send_message(cid, full_text.strip(), reply_markup=markup, parse_mode='Markdown')
-    bot.register_next_step_handler(message, check_quiz_answer, target_word.translation.english)
+    question_message = bot.send_message(
+        user_id,
+        text,
+        parse_mode="Markdown",
+        reply_markup=markup,
+    )
+    bot.register_next_step_handler(
+        question_message,
+        check_quiz_answer,
+        target_word.english,
+    )
 
 
-def check_quiz_answer(message, correct_option):
-    cid = message.chat.id
-    user_answer = message.text
+def check_quiz_answer(message, correct_option: str):
+    """Проверяет ответ пользователя в викторине."""
 
-    if user_answer == 'Выйти в меню 🏠' or user_answer == '/start':
-        bot.clear_step_handler_by_chat_id(cid)
-        return bot.send_message(cid, "Возвращаюсь в меню...", reply_markup=main_menu_keyboard())
+    user_id = message.chat.id
+    user_answer = (message.text or "").strip()
 
-    if user_answer and user_answer.lower() == correct_option.lower():
+    if user_answer in {"Выйти в меню 🏠", "/start"}:
+        bot.clear_step_handler_by_chat_id(user_id)
+        bot.send_message(
+            user_id,
+            "Возвращаюсь в меню...",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if user_answer.lower() == correct_option.lower():
         send_quiz_question(message, prefix="Отлично! ✨")
-    else:
-        bot.send_message(cid, "Неверно ❌ Попробуй еще раз!")
-        bot.register_next_step_handler(message, check_quiz_answer, correct_option)
+        return
 
+    bot.send_message(user_id, "Неверно ❌ Попробуй еще раз!")
+    bot.register_next_step_handler(message, check_quiz_answer, correct_option)
 
-# --- ДОБАВЛЕНИЕ СЛОВА ---
 
 def add_word_ru(message):
-    ru_word = message.text
-    if not ru_word: return
-    msg = bot.send_message(message.chat.id, f"Введите перевод для '{ru_word}':")
-    bot.register_next_step_handler(msg, add_word_finalize, ru_word)
+    """Запрашивает английский перевод введенного русского слова."""
+
+    ru_word = (message.text or "").strip()
+    if not ru_word:
+        bot.send_message(
+            message.chat.id,
+            "Пустое значение. Попробуйте снова через меню.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    prompt = bot.send_message(message.chat.id, f"Введите перевод для '{ru_word}':")
+    bot.register_next_step_handler(prompt, add_word_finalize, ru_word)
 
 
-def add_word_finalize(message, ru_word):
-    en_word = message.text
-    if not en_word: return
-    session = get_session()
-    try:
-        new_word = Word(russian=ru_word, is_common=False)
-        new_word.translation = Translation(english=en_word)
-        session.add(new_word)
-        session.flush()
-        session.add(UserWord(user_id=message.chat.id, word_id=new_word.id))
-        session.commit()
-        bot.send_message(message.chat.id, f"Слово '{ru_word}' добавлено!", reply_markup=main_menu_keyboard())
-    except:
-        session.rollback()
-        bot.send_message(message.chat.id, "Ошибка сохранения.", reply_markup=main_menu_keyboard())
-    finally:
-        session.close()
+def add_word_finalize(message, ru_word: str):
+    """Сохраняет новое персональное слово пользователя."""
 
+    en_word = (message.text or "").strip()
+    if not en_word:
+        bot.send_message(
+            message.chat.id,
+            "Пустое значение. Попробуйте снова через меню.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
-# --- УДАЛЕНИЕ СЛОВА ---
+    is_added, personal_count = WordService.add_personal_word(
+        user_id=message.chat.id,
+        russian=ru_word,
+        english=en_word,
+    )
+
+    if not is_added:
+        bot.send_message(
+            message.chat.id,
+            "Такое слово уже есть в вашем персональном словаре.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    bot.send_message(
+        message.chat.id,
+        (
+            f"Слово '{ru_word}' добавлено!\n"
+            f"Вы изучаете {personal_count} персональных слов."
+        ),
+        reply_markup=main_menu_keyboard(),
+    )
+
 
 def delete_word_start(message):
-    cid = message.chat.id
-    words = get_only_personal_words(cid)
+    """Показывает персональные слова для выбора удаления."""
+
+    user_id = message.chat.id
+    words = WordService.get_personal_words(user_id)
 
     if not words:
-        bot.send_message(cid, "Ваш личный словарь пуст!", reply_markup=main_menu_keyboard())
+        bot.send_message(
+            user_id,
+            "Ваш личный словарь пуст!",
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-    for w in words: markup.add(types.KeyboardButton(w.russian))
-    markup.add(types.KeyboardButton('Отмена'))
+    for word in words:
+        markup.add(types.KeyboardButton(word.russian))
+    markup.add(types.KeyboardButton("Отмена"))
 
-    msg = bot.send_message(cid, "Выберите слово из списка для удаления:", reply_markup=markup)
-    bot.register_next_step_handler(msg, delete_word_finalize)
+    prompt = bot.send_message(
+        user_id,
+        "Выберите слово из списка для удаления:",
+        reply_markup=markup,
+    )
+    bot.register_next_step_handler(prompt, delete_word_finalize)
 
 
 def delete_word_finalize(message):
-    if message.text == 'Отмена':
-        return bot.send_message(message.chat.id, "Отменено.", reply_markup=main_menu_keyboard())
+    """Удаляет слово только из персонального списка текущего пользователя."""
 
-    session = get_session()
-    try:
-        word_obj = session.query(Word).join(UserWord).filter(
-            UserWord.user_id == message.chat.id, Word.russian == message.text).first()
-        if word_obj:
-            session.delete(word_obj)
-            session.commit()
-            bot.send_message(message.chat.id, f"Слово '{message.text}' удалено!", reply_markup=main_menu_keyboard())
-        else:
-            bot.send_message(message.chat.id, "Слово не найдено.", reply_markup=main_menu_keyboard())
-    finally:
-        session.close()
+    if message.text == "Отмена":
+        bot.send_message(
+            message.chat.id,
+            "Отменено.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    deleted = WordService.delete_personal_word(message.chat.id, message.text)
+    if not deleted:
+        bot.send_message(
+            message.chat.id,
+            "Слово не найдено.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    bot.send_message(
+        message.chat.id,
+        f"Слово '{message.text}' удалено из вашего словаря!",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
-if __name__ == '__main__':
-    print("Бот запущен..")
+if __name__ == "__main__":
+    print(f"Бот запущен.. БД: {get_dsn()}")
     bot.infinity_polling(skip_pending=True)
